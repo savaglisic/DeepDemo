@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>DeepFlavor Emotion Demo</title>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@100&display=swap');
+
+      body {
+        background-color: lightblue;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        font-family: 'Roboto', sans-serif;
+      }
+
+      #logo-container {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        margin-top: 1rem;
+      }
+
+      #logo-container img {
+        margin: 0 0.5rem;
+      }
+
+      #content {
+        display: flex;
+        margin-top: 1rem;
+      }
+
+      #emotions-container {
+        width: 200px;
+      }
+
+      #status {
+        font-size: 1.5rem;
+      }
+
+      #emotions {
+        margin-left: 1rem;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      #emotions p {
+        margin: 0.2rem 0;
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@2.4.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection@0.0.1/dist/face-landmarks-detection.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <div id="logo-container">
+      <img src="https://i.imgur.com/vZrpTOW.png" alt="Logo 1" />
+      <img src="https://i.imgur.com/XevRyVM.png" alt="Logo 2" />
+    </div>
+    <div id="content">
+      <canvas id="output"></canvas>
+      <div id="emotions-container">
+        <h1 id="status">Loading...</h1>
+        <div id="emotions"></div>
+        <canvas id="emotionChart" width="300" height="300"></canvas>
+    </div>    
+    </div>
+    <video id="webcam" playsinline style="visibility: hidden; width: auto; height: auto;"></video>
+    <script>
+      function setText(text) {
+        document.getElementById("status").innerText = text;
+      }
+
+      function drawLine(ctx, x1, y1, x2, y2) {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+
+      function displayEmotionPercentages(percentages) {
+      const emotionsDiv = document.getElementById("emotions");
+      emotionsDiv.innerHTML = "";
+      for (const emotion in percentages) {
+        const percentage = Math.round(percentages[emotion] * 10) * 10; // Round to the nearest ten
+        const line = document.createElement("p");
+        line.innerText = `${emotion}: ${percentage}%`;
+        emotionsDiv.appendChild(line);
+      }
+    }
+
+
+      async function setupWebcam() {
+        return new Promise((resolve, reject) => {
+          const webcamElement = document.getElementById("webcam");
+          const navigatorAny = navigator;
+          navigator.getUserMedia = navigator.getUserMedia ||
+            navigatorAny.webkitGetUserMedia || navigatorAny.mozGetUserMedia ||
+            navigatorAny.msGetUserMedia;
+          if (navigator.getUserMedia) {
+            navigator.getUserMedia({ video: true },
+              stream => {
+                webcamElement.srcObject = stream;
+                webcamElement.addEventListener("loadeddata", resolve, false);
+              },
+              error => reject());
+          } else {
+            reject();
+          }
+        });
+      }
+
+      const emotions = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"];
+      let emotionModel = null;
+
+      let output = null;
+      let model = null;
+
+      function createEmotionChart() {
+    const ctx = document.getElementById("emotionChart").getContext("2d");
+    const data = {
+        labels: emotions,
+        datasets: [
+            {
+                label: "Emotion Percentages",
+                data: new Array(emotions.length).fill(0),
+                backgroundColor: [
+                    "rgba(255, 99, 132, 0.2)",
+                    "rgba(255, 159, 64, 0.2)",
+                    "rgba(255, 205, 86, 0.2)",
+                    "rgba(75, 192, 192, 0.2)",
+                    "rgba(54, 162, 235, 0.2)",
+                    "rgba(153, 102, 255, 0.2)",
+                    "rgba(201, 203, 207, 0.8)"
+                ],
+                borderColor: [
+                    "rgb(255, 99, 132)",
+                    "rgb(255, 159, 64)",
+                    "rgb(255, 205, 86)",
+                    "rgb(75, 192, 192)",
+                    "rgb(54, 162, 235)",
+                    "rgb(153, 102, 255)",
+                    "rgb(201, 203, 207)"
+                ],
+                borderWidth: 1
+            }
+        ]
+    };
+    const config = {
+        type: "bar",
+        data: data,
+        options: {
+            plugins: {
+                legend: {
+                    display: false
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    max: 1
+                },
+                x: {
+                    ticks: {
+                        autoSkip: false, // Disable auto skipping of labels
+                        maxRotation: 45, // Rotate labels by 45 degrees
+                        minRotation: 45
+                    }
+                }
+            }
+        }
+    };
+    return new Chart(ctx, config);
+}
+
+      async function predictEmotion(points) {
+        let result = tf.tidy(() => {
+          const xs = tf.stack([tf.tensor1d(points)]);
+          return emotionModel.predict(xs);
+        });
+        let prediction = await result.data();
+        result.dispose();
+        let emotionPercentages = {};
+        for (let i = 0; i < emotions.length; i++) {
+          emotionPercentages[emotions[i]] = prediction[i];
+        }
+        return emotionPercentages;
+      }
+
+      async function trackFace() {
+        const video = document.querySelector("video");
+        const faces = await model.estimateFaces({
+          input: video,
+          returnTensors: false,
+          flipHorizontal: false,
+        });
+        output.drawImage(
+          video,
+          0, 0, video.width, video.height,
+          0, 0, video.width, video.height
+        );
+
+        let points = null;
+        faces.forEach(face => {
+          // Draw the bounding box
+          const x1 = face.boundingBox.topLeft[0];
+          const y1 = face.boundingBox.topLeft[1];
+          const x2 = face.boundingBox.bottomRight[0];
+          const y2 = face.boundingBox.bottomRight[1];
+          const bWidth = x2 - x1;
+          const bHeight = y2 - y1;
+          drawLine(output, x1, y1, x2, y1);
+          drawLine(output, x2, y1, x2, y2);
+          drawLine(output, x1, y2, x2, y2);
+          drawLine(output, x1, y1, x1, y2);
+
+          // Add just the nose, cheeks, eyes, eyebrows & mouth
+          const features = [
+            "noseTip",
+            "leftCheek",
+            "rightCheek",
+            "leftEyeLower1", "leftEyeUpper1",
+            "rightEyeLower1", "rightEyeUpper1",
+            "leftEyebrowLower",
+            "rightEyebrowLower",
+            "lipsLowerInner",
+            "lipsUpperInner",
+          ];
+          points = [];
+          features.forEach(feature => {
+            face.annotations[feature].forEach(x => {
+              points.push((x[0] - x1) / bWidth);
+              points.push((x[1] - y1) / bHeight);
+            });
+          });
+        });
+
+        if (points) {
+        let emotionPercentages = await predictEmotion(points);
+        
+        // Round the percentages to the nearest ten
+        for (const emotion in emotionPercentages) {
+          emotionPercentages[emotion] = Math.round(emotionPercentages[emotion] * 10) * 0.1;
+        }
+
+        let dominantEmotion = Object.keys(emotionPercentages).reduce((a, b) => (emotionPercentages[a] > emotionPercentages[b] ? a : b));
+        setText(`Detected: ${dominantEmotion}`);
+        displayEmotionPercentages(emotionPercentages);
+
+        // Update chart data
+        emotionChart.data.datasets[0].data = Object.values(emotionPercentages);
+        emotionChart.update();
+      } else {
+        setText("No Face");
+      }
+
+      requestAnimationFrame(trackFace);
+        
+      }
+      let emotionChart = null;
+
+      (async () => {
+        await setupWebcam();
+        const video = document.getElementById("webcam");
+        video.play();
+        let videoWidth = video.videoWidth;
+        let videoHeight = video.videoHeight;
+        video.width = videoWidth;
+        video.height = videoHeight;
+
+        let canvas = document.getElementById("output");
+        canvas.width = video.width;
+        canvas.height = video.height;
+
+        output = canvas.getContext("2d");
+        output.translate(canvas.width, 0);
+        output.scale(-1, 1); // Mirror cam
+        output.fillStyle = "#fdffb6";
+        output.strokeStyle = "#fdffb6";
+        output.lineWidth = 2;
+
+        // Load Face Landmarks Detection
+        model = await faceLandmarksDetection.load(
+          faceLandmarksDetection.SupportedPackages.mediapipeFacemesh
+        );
+        // Load Emotion Detection
+        emotionModel = await tf.loadLayersModel('web/model/facemo.json');
+
+        setText("Loaded!");
+        emotionChart = createEmotionChart();
+
+        trackFace();
+      })();
+    </script>
+  </body>
+</html>
+
+
